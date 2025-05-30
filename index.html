@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Animasi EKG Lanjutan</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000000; /* Hitam pekat */
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 800px;
+            height: auto;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            background-color: #080808; /* Sangat gelap, nyaris hitam */
+            border: 2px solid #1A1A1A;
+            border-radius: 10px;
+            padding: 15px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.1);
+        }
+
+        #ekgCanvas {
+            width: 100%;
+            height: 250px;
+            background-color: #000000; /* Layar hitam */
+            border-radius: 5px;
+        }
+
+        #myVideo {
+            width: 100%;
+            max-width: 780px;
+            height: auto;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+
+        #controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 15px;
+        }
+
+        #controls button {
+            padding: 10px 20px;
+            font-size: 15px;
+            color: #00FF00; /* Teks hijau neon */
+            border: 1px solid #008000; /* Border hijau tua */
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease, color 0.3s ease;
+            background-color: #101010; /* Abu-abu sangat gelap */
+        }
+
+        #controls button:hover {
+            background-color: #00FF00;
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <canvas id="ekgCanvas"></canvas>
+        <video id="myVideo" style="display: none;" controls playsinline>
+            <source src="kwz.mp4" type="video/mp4">
+            Browser Anda tidak mendukung tag video.
+        </video>
+        <div id="controls" style="display: none;">
+            <button id="playAgainBtn">Putar Ulang</button>
+            <button id="sendMessageBtn">Kirim Pesan</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('ekgCanvas');
+            const video = document.getElementById('myVideo');
+            const controlsDiv = document.getElementById('controls');
+            const playAgainBtn = document.getElementById('playAgainBtn');
+            const sendMessageBtn = document.getElementById('sendMessageBtn');
+
+            if (!canvas || !video || !controlsDiv || !playAgainBtn || !sendMessageBtn) {
+                console.error("HTML elements missing!"); return;
+            }
+            const ctx = canvas.getContext('2d');
+            if (!ctx) { console.error("Canvas 2D context failed!"); return; }
+
+            let W, H, baselineY, amplitudeScale;
+
+            // Fase Global Animasi
+            const PHASE_PQRST_1 = 0;
+            const PHASE_PQRST_2 = 1;
+            const PHASE_PQRST_3 = 2;
+            const PHASE_LOVE_DRAWING = 3;
+            const PHASE_CHENI_DRAWING = 4;
+            const PHASE_FLATLINE = 5;
+            const PHASE_VIDEO = 6;
+            const PHASE_IDLE = 7; // Setelah video selesai
+
+            let currentGlobalPhase = PHASE_PQRST_1;
+            let animationStartTime = 0;
+            let animationFrameId = null;
+
+            const pqrstDuration = 1500; // 1.5 detik per PQRST blip
+            const loveDrawingDuration = 3000; // Durasi menggambar hati
+            const cheniDrawingDuration = 4000; // Durasi menggambar "Cheni"
+            const flatlineDisplayDuration = 1500;
+            const videoStartDelay = 200;
+
+            // Titik-titik untuk PQRST blip (seperti gambar referensi)
+            // x: posisi horizontal relatif pada area blip (0-1)
+            // y_offset: offset vertikal dari baseline
+            const pqrstBlipPoints = [
+                { x: 0.0, y_offset: 0 },
+                { x: 0.05, y_offset: 0 },    // isoelectric
+                { x: 0.1, y_offset: -0.1 },  // P wave start
+                { x: 0.15, y_offset: -0.2 }, // P wave peak
+                { x: 0.2, y_offset: -0.1 },  // P wave end
+                { x: 0.25, y_offset: 0 },    // isoelectric
+                { x: 0.3, y_offset: 0.15 },  // Q wave
+                { x: 0.38, y_offset: -1.8 }, // R peak (tinggi)
+                { x: 0.46, y_offset: 0.6 },  // S wave
+                { x: 0.52, y_offset: 0 },    // isoelectric
+                { x: 0.6, y_offset: -0.3 },  // T wave start
+                { x: 0.7, y_offset: -0.4 },  // T wave peak
+                { x: 0.8, y_offset: -0.3 },  // T wave end
+                { x: 0.85, y_offset: 0 },    // isoelectric
+                { x: 1.0, y_offset: 0 }
+            ];
+            const blipAreaStartX = 0.65; // Blip muncul mulai dari 65% lebar canvas
+            const blipAreaWidthRatio = 0.3; // Lebar area blip adalah 30% dari canvas
+
+            // Titik-titik untuk path hati (x,y dinormalisasi 0-1 dalam area gambar hati)
+            const heartPathPoints = [
+                { x: 0.5, y: 0.9 }, // Bottom point
+                { x: 0.1, y: 0.4 }, { x: 0.1, y: 0.2 }, { x: 0.3, y: 0.05 }, { x: 0.5, y: 0.2 }, // Left lobe
+                { x: 0.7, y: 0.05 }, { x: 0.9, y: 0.2 }, { x: 0.9, y: 0.4 }, { x: 0.5, y: 0.9 }  // Right lobe and close
+            ];
+            // Area untuk menggambar hati
+            const heartArea = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 }; // Relatif ke canvas
+
+            // Titik-titik untuk path "CHENI" (sangat disederhanakan, perlu penyesuaian)
+            // Setiap huruf adalah array of points [{x,y}, ...], x,y normalized 0-1 within letter area
+            // Ini akan digambar berurutan.
+            const cheniLetterPaths = {
+                'C': [ {x:0.8,y:0.2},{x:0.4,y:0.1},{x:0.2,y:0.2},{x:0.1,y:0.4},{x:0.1,y:0.6},{x:0.2,y:0.8},{x:0.4,y:0.9},{x:0.8,y:0.8} ],
+                'H': [ {x:0.1,y:0.1},{x:0.1,y:0.9}, {x:0.1,y:0.5},{x:0.9,y:0.5}, {x:0.9,y:0.1},{x:0.9,y:0.9} ],
+                'E': [ {x:0.8,y:0.1},{x:0.1,y:0.1}, {x:0.1,y:0.5},{x:0.6,y:0.5}, {x:0.1,y:0.9},{x:0.8,y:0.9} ],
+                'N': [ {x:0.1,y:0.9},{x:0.1,y:0.1}, {x:0.8,y:0.9}, {x:0.8,y:0.1} ],
+                'I': [ {x:0.5,y:0.1},{x:0.5,y:0.9}, {x:0.3,y:0.1},{x:0.7,y:0.1}, {x:0.3,y:0.9},{x:0.7,y:0.9} ] // Kasar
+            };
+            const cheniLetters = ['C', 'H', 'E', 'N', 'I'];
+            const cheniLetterSpacing = 0.05 * W; // Akan diupdate di resize
+            const cheniTotalWidthRatio = 0.8; // Total lebar untuk semua huruf CHENI
+            const cheniCharHeightRatio = 0.6; // Tinggi karakter
+
+            function resizeCanvas() {
+                const containerStyle = getComputedStyle(document.querySelector('.container'));
+                canvas.width = parseInt(getComputedStyle(canvas).width, 10) || (parseInt(containerStyle.width, 10) - 30);
+                canvas.height = parseInt(getComputedStyle(canvas).height, 10) || 250;
+                W = canvas.width; H = canvas.height;
+                baselineY = H / 2;
+                amplitudeScale = H / 3.5; // Untuk PQRST blip
+
+                ctx.fillStyle = getComputedStyle(canvas).backgroundColor;
+                ctx.fillRect(0, 0, W, H);
+                console.log(`Canvas: ${W}x${H}, Baseline: ${baselineY}`);
+            }
+
+            function drawPQRSTBlip(progress) {
+                // Garis baseline panjang
+                ctx.beginPath();
+                ctx.strokeStyle = '#00FF00';
+                ctx.lineWidth = 2;
+                ctx.moveTo(0, baselineY);
+                ctx.lineTo(W, baselineY);
+                ctx.stroke();
+
+                // Titik hijau di awal garis (seperti gambar)
+                ctx.beginPath();
+                ctx.fillStyle = '#00FF00';
+                ctx.arc(5, baselineY, 3, 0, Math.PI * 2); // Titik kecil di awal
+                ctx.fill();
+
+                // Amplitudo denyut (naik turun)
+                const currentAmplitude = Math.sin(progress * Math.PI) * amplitudeScale;
+                const blipActualWidth = W * blipAreaWidthRatio;
+                const blipActualStartX = W * blipAreaStartX;
+
+                ctx.beginPath();
+                ctx.strokeStyle = '#00FF00';
+                ctx.lineWidth = 2.5;
+                
+                pqrstBlipPoints.forEach((p, i) => {
+                    const xPos = blipActualStartX + p.x * blipActualWidth;
+                    const yPos = baselineY + p.y_offset * currentAmplitude;
+                    if (i === 0) ctx.moveTo(xPos, yPos);
+                    else ctx.lineTo(xPos, yPos);
+                });
+                ctx.stroke();
+            }
+
+            function drawPathProgressively(pathPoints, area, progress, color, lineWidth) {
+                if (!pathPoints || pathPoints.length === 0) return;
+                
+                const numSegmentsToDraw = Math.floor(progress * (pathPoints.length -1));
+                const remainderProgress = (progress * (pathPoints.length -1)) - numSegmentsToDraw;
+
+                ctx.beginPath();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = lineWidth;
+
+                const areaX = area.x * W; const areaY = area.y * H;
+                const areaW = area.w * W; const areaH = area.h * H;
+
+                ctx.moveTo(areaX + pathPoints[0].x * areaW, areaY + pathPoints[0].y * areaH);
+
+                for (let i = 0; i < numSegmentsToDraw; i++) {
+                    ctx.lineTo(areaX + pathPoints[i+1].x * areaW, areaY + pathPoints[i+1].y * areaH);
+                }
+
+                if (numSegmentsToDraw < pathPoints.length - 1) {
+                    const currP = pathPoints[numSegmentsToDraw];
+                    const nextP = pathPoints[numSegmentsToDraw + 1];
+                    const interX = currP.x + (nextP.x - currP.x) * remainderProgress;
+                    const interY = currP.y + (nextP.y - currP.y) * remainderProgress;
+                    ctx.lineTo(areaX + interX * areaW, areaY + interY * areaH);
+                }
+                ctx.stroke();
+            }
+
+            function drawCheniProgressively(progress) {
+                const totalPathSegments = cheniLetters.reduce((sum, letter) => sum + (cheniLetterPaths[letter].length -1), 0);
+                const segmentsToDrawGlobal = progress * totalPathSegments;
+                
+                let segmentsDrawnCount = 0;
+                let currentXOffset = W * (1 - cheniTotalWidthRatio) / 2; // Mulai dari kiri area CHENI
+                const charHeight = H * cheniCharHeightRatio;
+                const charY = (H - charHeight) / 2; // Tengahkan vertikal
+
+                for (let char of cheniLetters) {
+                    const letterPath = cheniLetterPaths[char];
+                    const letterSegments = letterPath.length - 1;
+                    const charWidth = (W * cheniTotalWidthRatio / cheniLetters.length) - (0.02*W); // Estimasi lebar char
+
+                    const letterArea = {
+                        x: currentXOffset / W,
+                        y: charY / H,
+                        w: charWidth / W,
+                        h: charHeight / H
+                    };
+
+                    let segmentsForThisLetter = 0;
+                    if (segmentsDrawnCount + letterSegments <= segmentsToDrawGlobal) {
+                        segmentsForThisLetter = 1.0; // Gambar penuh
+                    } else if (segmentsDrawnCount < segmentsToDrawGlobal) {
+                        segmentsForThisLetter = (segmentsToDrawGlobal - segmentsDrawnCount) / letterSegments;
+                    }
+                    
+                    drawPathProgressively(letterPath, letterArea, segmentsForThisLetter, '#00FF00', 2.5);
+                    
+                    segmentsDrawnCount += letterSegments;
+                    currentXOffset += charWidth + (0.02*W); // Tambah spasi
+                    if (segmentsDrawnCount > segmentsToDrawGlobal) break; 
+                }
+            }
+
+
+            function mainAnimationLoop(timestamp) {
+                if (!animationStartTime) animationStartTime = timestamp;
+                ctx.clearRect(0, 0, W, H);
+                
+                let progress = 0;
+                let phaseDuration = 0;
+
+                switch (currentGlobalPhase) {
+                    case PHASE_PQRST_1:
+                    case PHASE_PQRST_2:
+                    case PHASE_PQRST_3:
+                        phaseDuration = pqrstDuration;
+                        progress = (timestamp - animationStartTime) / phaseDuration;
+                        drawPQRSTBlip(progress);
+                        if (progress >= 1) {
+                            currentGlobalPhase++;
+                            animationStartTime = timestamp;
+                        }
+                        break;
+
+                    case PHASE_LOVE_DRAWING:
+                        phaseDuration = loveDrawingDuration;
+                        progress = (timestamp - animationStartTime) / phaseDuration;
+                        drawPathProgressively(heartPathPoints, heartArea, progress, '#FF69B4', 3);
+                        if (progress >= 1) {
+                            currentGlobalPhase = PHASE_CHENI_DRAWING;
+                            animationStartTime = timestamp;
+                        }
+                        break;
+
+                    case PHASE_CHENI_DRAWING:
+                        phaseDuration = cheniDrawingDuration;
+                        progress = (timestamp - animationStartTime) / phaseDuration;
+                        drawCheniProgressively(progress);
+                        if (progress >= 1) {
+                            currentGlobalPhase = PHASE_FLATLINE;
+                            animationStartTime = timestamp;
+                        }
+                        break;
+
+                    case PHASE_FLATLINE:
+                        phaseDuration = flatlineDisplayDuration;
+                        progress = (timestamp - animationStartTime) / phaseDuration;
+                        ctx.beginPath();
+                        ctx.strokeStyle = 'red';
+                        ctx.lineWidth = 2.2;
+                        ctx.moveTo(0, baselineY);
+                        ctx.lineTo(W, baselineY);
+                        ctx.stroke();
+                        if (progress >= 1) {
+                            currentGlobalPhase = PHASE_VIDEO;
+                            animationStartTime = timestamp; // Untuk delay video
+                        }
+                        break;
+
+                    case PHASE_VIDEO:
+                        // Tunggu sebentar sebelum video
+                        if (timestamp - animationStartTime > videoStartDelay) {
+                            console.log("Switch to VIDEO");
+                            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                            canvas.style.display = 'none';
+                            video.style.display = 'block';
+                            video.play().catch(e => {
+                                console.error("Error playing video:", e);
+                                alert("Gagal memulai video. Cek konsol (F12).");
+                                showControls();
+                            });
+                            currentGlobalPhase = PHASE_IDLE; // Agar tidak masuk sini lagi
+                        }
+                        break;
+                    
+                    case PHASE_IDLE:
+                        // Do nothing, waiting for controls
+                        return; // Hentikan loop
+                }
+
+                if (currentGlobalPhase < PHASE_IDLE) {
+                    animationFrameId = requestAnimationFrame(mainAnimationLoop);
+                }
+            }
+            
+            function showControls() {
+                if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                video.style.display = 'none';
+                canvas.style.display = 'none';
+                controlsDiv.style.display = 'flex';
+                currentGlobalPhase = PHASE_IDLE;
+            }
+
+            video.onloadeddata = () => console.log("Video data loaded.");
+            video.onerror = (e) => {
+                console.error("Video Error Event:", e);
+                alert("Gagal memuat file video 'kwz.mp4'. Pastikan ada di folder yang sama.");
+                showControls();
+            };
+            video.onended = () => {
+                console.log("Video ended.");
+                showControls();
+            };
+
+            playAgainBtn.onclick = () => {
+                console.log("Play Again clicked.");
+                controlsDiv.style.display = 'none';
+                video.style.display = 'none';
+                video.currentTime = 0;
+                
+                canvas.style.display = 'block';
+                ctx.clearRect(0, 0, W, H);
+
+                currentGlobalPhase = PHASE_PQRST_1;
+                animationStartTime = 0;
+                
+                if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                console.log("Restarting EKG animation.");
+                animationFrameId = requestAnimationFrame(mainAnimationLoop);
+            };
+
+            sendMessageBtn.onclick = () => {
+                window.open(`https://wa.me/6281384940398`, '_blank');
+            };
+
+            window.addEventListener('resize', resizeCanvas);
+            resizeCanvas();
+
+            if (W > 0 && H > 0) {
+                console.log("EKG Animation starting...");
+                animationFrameId = requestAnimationFrame(mainAnimationLoop);
+            } else {
+                console.error("Canvas dimensions invalid. Animation cannot start.");
+                alert("Gagal memulai animasi: Ukuran canvas tidak valid.");
+            }
+        });
+    </script>
+</body>
+</html>
